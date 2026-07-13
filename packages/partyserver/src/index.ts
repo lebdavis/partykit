@@ -985,20 +985,30 @@ export class Server<
    * Resolves from `this.ctx.id.name` — the native DO id name, which the
    * runtime populates since 2026-03-15
    * (https://developers.cloudflare.com/changelog/post/2026-03-15-durable-object-id-name/).
-   * Availability matrix (per
-   * https://developers.cloudflare.com/durable-objects/api/id/#name):
+   * Availability matrix:
    *
-   *   - `idFromName()` / `getByName()`: POPULATED, from construction
-   *     onward — every entry point, including alarm handlers for alarms
-   *     scheduled on or after 2026-03-15.
-   *   - `idFromString()`: UNDEFINED, permanently, by design — even if
-   *     the ID was originally created with `idFromName()`.
+   *   - `idFromName()` / `getByName()`: POPULATED. Availability inside
+   *     the constructor and class field initializers isn't spelled out
+   *     in the docs — it is pinned by workerd's own tests
+   *     (https://github.com/cloudflare/workerd/pull/6421) and this
+   *     repo's `NameInConstructorServer` / "Raw runtime contract"
+   *     tests. Availability on hibernating-WebSocket wakeups is not
+   *     documented; PartyServer does not rely on it — the `__ps_name`
+   *     fallback covers it.
+   *   - `idFromString()`: UNDEFINED, permanently, by design (per
+   *     https://developers.cloudflare.com/durable-objects/api/id/#name)
+   *     — even if the ID was originally created with `idFromName()`.
    *   - `newUniqueId()`: UNDEFINED.
    *   - Names longer than 1,024 bytes: UNDEFINED (not passed through
    *     to `ctx.id`).
-   *   - Alarms scheduled before 2026-03-15: UNDEFINED when they fire —
-   *     the on-disk alarm record carries no name. PartyServer recovers
-   *     the name from the `__ps_name` storage fallback record instead.
+   *   - Alarms: POPULATED only for alarms scheduled on or after
+   *     2026-03-15 from a context where `ctx.id.name` was itself
+   *     available. Alarms scheduled before 2026-03-15 fire with it
+   *     UNDEFINED (the on-disk alarm record carries no name), and per
+   *     the DO id docs an alarm rescheduled from such a nameless
+   *     handler also fires without a name. PartyServer recovers the
+   *     name from the `__ps_name` storage fallback record in both
+   *     cases.
    *
    * When `ctx.id.name` is undefined, falls back to the in-memory /
    * stored name (`setName()` bootstrap or `__ps_name` record). Throws
