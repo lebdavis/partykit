@@ -850,6 +850,14 @@ export class Server<
    *      `__ps_name` directly (or call `setName()`) before triggering
    *      `__unsafe_ensureInitialized()` — typically DOs addressed via
    *      `idFromString()` / `newUniqueId()` plus a name override.
+   *
+   * PartyServer no longer WRITES this record during named-access
+   * initialization: `ctx.id.name` is populated natively across cold
+   * starts, hibernating-WebSocket wakeups, and alarm wakeups after
+   * eviction (verified in production on a worker pinned to
+   * `compatibility_date` 2024-06-01, so the behavior is not compat-date
+   * gated). Existing records — written by older partyserver versions or
+   * by the `setName()` bootstrap — are honored on read.
    */
   async #hydrateNameFromLegacyStorage(): Promise<void> {
     if (this.#_name) return;
@@ -857,17 +865,6 @@ export class Server<
     if (stored) {
       this.#_name = stored;
     }
-  }
-
-  async #persistNameFallbackFromCtxId(): Promise<void> {
-    const ctxName = this.ctx.id.name;
-    if (ctxName === undefined || this.#_name) return;
-
-    const stored = await this.ctx.storage.get<string>(NAME_STORAGE_KEY);
-    if (stored !== ctxName) {
-      await this.ctx.storage.put(NAME_STORAGE_KEY, ctxName);
-    }
-    this.#_name = ctxName;
   }
 
   /**
@@ -884,15 +881,18 @@ export class Server<
   async #ensureInitialized(): Promise<void> {
     if (this.#status === "started") return;
 
-    // Persist a fallback record for name-based DOs before user startup
-    // code can schedule alarms. Current workerd populates `ctx.id.name`
-    // in alarm handlers, but stale on-disk alarm records scheduled by
-    // older workerd versions do not, and we want recovery from those
-    // without requiring users to wipe `.wrangler/state` or to reschedule
-    // alarms from a fetch handler. See cloudflare/partykit#390.
-    if (this.ctx.id.name !== undefined) {
-      await this.#persistNameFallbackFromCtxId();
-    } else if (!this.#_name) {
+    // When the runtime provides no native name (raw-ID addressing, or
+    // an alarm record scheduled before 2026-03-15), fall back to the
+    // legacy `__ps_name` storage record. When `ctx.id.name` IS defined
+    // there is nothing to do: PartyServer no longer persists a
+    // `__ps_name` fallback copy of the native name — production
+    // verification on a worker pinned to `compatibility_date`
+    // 2024-06-01 (i.e. ungated by compat date) confirmed `ctx.id.name`
+    // is populated in the constructor, on hibernating-WebSocket
+    // wakeups, and in alarm handlers firing on cold instances after
+    // eviction. Records written by older partyserver versions (or by
+    // the `setName()` bootstrap) are still honored on read.
+    if (this.ctx.id.name === undefined && !this.#_name) {
       await this.#hydrateNameFromLegacyStorage();
     }
 
@@ -993,8 +993,10 @@ export class Server<
    *     (https://github.com/cloudflare/workerd/pull/6421) and this
    *     repo's `NameInConstructorServer` / "Raw runtime contract"
    *     tests. Availability on hibernating-WebSocket wakeups is not
-   *     documented; PartyServer does not rely on it — the `__ps_name`
-   *     fallback covers it.
+   *     documented either — it is pinned by production verification
+   *     (a hibernated instance woken by a WebSocket message sees
+   *     `ctx.id.name` in both the constructor and `webSocketMessage`,
+   *     on a worker pinned to `compatibility_date` 2024-06-01).
    *   - `idFromString()`: UNDEFINED, permanently, by design (per
    *     https://developers.cloudflare.com/durable-objects/api/id/#name)
    *     — even if the ID was originally created with `idFromName()`.
@@ -1006,9 +1008,11 @@ export class Server<
    *     available. Alarms scheduled before 2026-03-15 fire with it
    *     UNDEFINED (the on-disk alarm record carries no name), and per
    *     the DO id docs an alarm rescheduled from such a nameless
-   *     handler also fires without a name. PartyServer recovers the
-   *     name from the `__ps_name` storage fallback record in both
-   *     cases.
+   *     handler also fires without a name. Where a legacy `__ps_name`
+   *     record exists (written by an older partyserver version or a
+   *     `setName()` bootstrap), PartyServer recovers the name from it
+   *     in both cases; otherwise, per the DO id docs, reschedule the
+   *     alarm from a fetch/RPC handler where the name is available.
    *
    * When `ctx.id.name` is undefined, falls back to the in-memory /
    * stored name (`setName()` bootstrap or `__ps_name` record). Throws
@@ -1021,7 +1025,7 @@ export class Server<
     if (ctxName !== undefined) return ctxName;
     if (this.#_name) return this.#_name;
     throw new Error(
-      `Attempting to read .name on ${this.#ParentClass.name}, but this.ctx.id.name is not set and no ${NAME_STORAGE_KEY} fallback record is available. PartyServer requires DOs to be addressed via idFromName()/getByName(), or explicitly bootstrapped with setName() when using idFromString()/newUniqueId(). If this happens in an alarm handler firing on a stale alarm record, initialize the DO from a fetch/RPC entry point first so PartyServer can persist the fallback name.`
+      `Attempting to read .name on ${this.#ParentClass.name}, but this.ctx.id.name is not set and no ${NAME_STORAGE_KEY} fallback record is available. PartyServer requires DOs to be addressed via idFromName()/getByName(), or explicitly bootstrapped with setName() when using idFromString()/newUniqueId(). If this happens in an alarm handler firing on a stale (pre-2026-03-15) alarm record, reschedule the alarm from a fetch or RPC handler where ctx.id.name is available.`
     );
   }
 
@@ -1043,9 +1047,8 @@ export class Server<
    *
    * For DOs addressed via `idFromName()` / `getByName()`, `this.name`
    * is available automatically from `ctx.id.name`, so the name argument
-   * is purely a consistency check. The normal initialization path also
-   * persists a fallback record so old-compat alarm handlers can recover
-   * the name. Throws if `name` does not match `ctx.id.name`.
+   * is purely a consistency check — nothing is persisted. Throws if
+   * `name` does not match `ctx.id.name`.
    *
    * **Not appropriate for facets.** Cloudflare Agents and any other
    * framework using `ctx.facets.get(...)` should pass an explicit
