@@ -656,6 +656,15 @@ export class Server<
       // regardless of how it was supplied. `#ensureInitialized()` will
       // fall back to reading storage when neither ctx.id.name nor the
       // header has provided one.
+      //
+      // DEPRECATED: the `x-partykit-room` header fallback is a legacy
+      // name source for raw `stub.fetch()` callers and old clients, and
+      // will be removed in a future major version. Address servers via
+      // `idFromName()`/`getByName()` (routePartykitRequest and
+      // getServerByName already do) — the runtime populates
+      // `ctx.id.name` natively inside the DO since 2026-03-15:
+      // https://developers.cloudflare.com/changelog/post/2026-03-15-durable-object-id-name/
+      // https://developers.cloudflare.com/durable-objects/api/id/#name
       if (!this.ctx.id.name && !this.#_name) {
         const room = request.headers.get("x-partykit-room");
         if (room) this.#_name = room;
@@ -667,7 +676,7 @@ export class Server<
         throw new Error(`Cannot determine the name for ${this.#ParentClass.name}: this.ctx.id.name is undefined, no legacy __ps_name storage record is present, and no x-partykit-room header was supplied. Likely causes:
   1. The stub was built via idFromString()/newUniqueId(). PartyServer requires name-based addressing (idFromName/getByName).
   2. The workerd/wrangler runtime is too old to expose ctx.id.name — update to a recent wrangler release.
-  3. You called stub.fetch() directly without going through routePartykitRequest()/getServerByName(). Prefer those, or set the x-partykit-room header.`);
+  3. You called stub.fetch() directly without going through routePartykitRequest()/getServerByName(). Prefer those; the x-partykit-room header fallback is deprecated.`);
       }
 
       const url = new URL(request.url);
@@ -973,18 +982,29 @@ export class Server<
   /**
    * The name for this server.
    *
-   * Resolves from `this.ctx.id.name` — the native DO id name, populated
-   * whenever the stub was created via `idFromName()` or `getByName()`.
-   * This is available inside every entry point (including the constructor,
-   * alarms, and hibernating websocket handlers).
+   * Resolves from `this.ctx.id.name` — the native DO id name, which the
+   * runtime populates since 2026-03-15
+   * (https://developers.cloudflare.com/changelog/post/2026-03-15-durable-object-id-name/).
+   * Availability matrix (per
+   * https://developers.cloudflare.com/durable-objects/api/id/#name):
    *
-   * For alarm handlers firing on stale on-disk alarm records from
-   * older workerd versions that didn't persist `name` into the alarm
-   * record, the name is recovered from a storage fallback record.
+   *   - `idFromName()` / `getByName()`: POPULATED, from construction
+   *     onward — every entry point, including alarm handlers for alarms
+   *     scheduled on or after 2026-03-15.
+   *   - `idFromString()`: UNDEFINED, permanently, by design — even if
+   *     the ID was originally created with `idFromName()`.
+   *   - `newUniqueId()`: UNDEFINED.
+   *   - Names longer than 1,024 bytes: UNDEFINED (not passed through
+   *     to `ctx.id`).
+   *   - Alarms scheduled before 2026-03-15: UNDEFINED when they fire —
+   *     the on-disk alarm record carries no name. PartyServer recovers
+   *     the name from the `__ps_name` storage fallback record instead.
    *
-   * Throws if neither source is available — typically this means the DO
-   * was addressed via `idFromString()` or `newUniqueId()`, which is not
-   * supported by PartyServer.
+   * When `ctx.id.name` is undefined, falls back to the in-memory /
+   * stored name (`setName()` bootstrap or `__ps_name` record). Throws
+   * if neither source is available — typically this means the DO was
+   * addressed via `idFromString()` or `newUniqueId()` without a
+   * bootstrap, which is not supported by PartyServer.
    */
   get name(): string {
     const ctxName = this.ctx.id.name;
@@ -998,21 +1018,24 @@ export class Server<
   /**
    * Establish this server's name and trigger `onStart()`.
    *
-   * Use cases:
+   * Two roles:
    *
-   *   1. **Framework-level bootstrap of DOs where `ctx.id.name` is
-   *      undefined** — e.g. DOs addressed via `idFromString()` /
-   *      `newUniqueId()`. `setName()` stashes the name in memory and
-   *      persists it under `__ps_name` so cold-wake invocations
-   *      recover it via `#ensureInitialized()`'s legacy fallback.
-   *   2. **Delivering initial `props` to `onStart()`** via the
-   *      optional second argument.
+   *   1. **onStart synchronization + `props` delivery** — `getServerByName()`
+   *      calls this on every resolution so that `onStart()` has completed
+   *      (and received `props`) before user-defined RPC methods run.
+   *      This role is NOT deprecated; the method stays.
+   *   2. **Legacy name establishment for raw-ID DOs** — DOs addressed
+   *      via `idFromString()` / `newUniqueId()` have no `ctx.id.name`,
+   *      so `setName()` stashes the name in memory and persists it
+   *      under `__ps_name` so cold-wake invocations recover it via
+   *      `#ensureInitialized()`'s legacy fallback. This role is
+   *      DEPRECATED — see the `@deprecated` note below.
    *
-   * For DOs addressed via `idFromName()` / `getByName()`, calling
-   * `setName()` is redundant — `this.name` is available automatically
-   * from `ctx.id.name`. The normal initialization path also persists
-   * a fallback record so old-compat alarm handlers can recover the name.
-   * Throws if `name` does not match `ctx.id.name`.
+   * For DOs addressed via `idFromName()` / `getByName()`, `this.name`
+   * is available automatically from `ctx.id.name`, so the name argument
+   * is purely a consistency check. The normal initialization path also
+   * persists a fallback record so old-compat alarm handlers can recover
+   * the name. Throws if `name` does not match `ctx.id.name`.
    *
    * **Not appropriate for facets.** Cloudflare Agents and any other
    * framework using `ctx.facets.get(...)` should pass an explicit
@@ -1033,10 +1056,20 @@ export class Server<
    * https://developers.cloudflare.com/dynamic-workers/usage/durable-object-facets/
    * for the `FacetStartupOptions.id` semantics.
    *
-   * @deprecated for callers that address DOs via `idFromName()` /
-   * `getByName()`. Still the supported API for framework-level
-   * bootstrap of header/`newUniqueId`-addressed DOs and for
-   * delivering initial `props` to `onStart()`.
+   * @deprecated Using `setName()` to ESTABLISH a name — the bootstrap
+   * for DOs addressed via `idFromString()` / `newUniqueId()` — is
+   * deprecated and will become an error in a future major version.
+   * Address servers via `idFromName()` / `getByName()` instead: the
+   * runtime populates `ctx.id.name` natively inside the DO since
+   * 2026-03-15, so no name needs to be passed through arguments or
+   * persisted to storage. See
+   * https://developers.cloudflare.com/changelog/post/2026-03-15-durable-object-id-name/
+   * and
+   * https://developers.cloudflare.com/durable-objects/api/id/#name.
+   *
+   * The onStart-synchronization + `props`-delivery role (used by
+   * `getServerByName()` on every resolution) is NOT deprecated; the
+   * method itself stays.
    */
   async setName(name: string, props?: Props) {
     if (!name) {
