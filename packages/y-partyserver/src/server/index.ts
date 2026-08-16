@@ -191,11 +191,11 @@ export function withYjs<TBase extends ServerClass>(
     /**
      * Discards the current document and initializes a fresh one.
      *
-     * Pending persistence is flushed before the old document is destroyed,
-     * and the replacement is restored through `onLoad()` before its event
-     * handlers are attached. The reset is allowed only when no connections
-     * remain so a connected client cannot immediately repopulate the old
-     * state.
+     * Pending persistence is flushed before a replacement is restored through
+     * `onLoad()`. The old document remains active until loading succeeds, so a
+     * failed reset leaves the server on its previous usable document. The reset
+     * is allowed only when no connections remain so a connected client cannot
+     * immediately repopulate the old state.
      */
     async resetDocument(): Promise<void> {
       for (const _connection of this.getConnections()) {
@@ -204,17 +204,32 @@ export function withYjs<TBase extends ServerClass>(
         );
       }
 
+      let loadFailure: { error: unknown } | undefined;
       await this.ctx.blockConcurrencyWhile(async () => {
         this._saveDocument?.flush();
         await this._savePromise;
+
+        const previousDocument = this._document;
+        const replacementDocument = new WSSharedDoc();
+        this._document = replacementDocument;
+        try {
+          await this._loadDocument();
+        } catch (error) {
+          this._document = previousDocument;
+          replacementDocument.destroy();
+          loadFailure = { error };
+          return;
+        }
+
         this._saveDocument?.cancel();
         this._saveDocument = undefined;
-
-        this._document.destroy();
-        this._document = new WSSharedDoc();
-        await this._loadDocument();
+        previousDocument.destroy();
         this._attachDocumentListeners();
       });
+
+      if (loadFailure) {
+        throw loadFailure.error;
+      }
     }
 
     /**

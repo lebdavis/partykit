@@ -18,6 +18,7 @@ export type Env = {
   YHibernateTracker: DurableObjectNamespace<YHibernateTracker>;
   YResetOnLastDisconnect: DurableObjectNamespace<YResetOnLastDisconnect>;
   YPersistentResetOnLastDisconnect: DurableObjectNamespace<YPersistentResetOnLastDisconnect>;
+  YFailingResetLoad: DurableObjectNamespace<YFailingResetLoad>;
 };
 
 // ---------------------------------------------------------------------------
@@ -232,6 +233,37 @@ export class YPersistentResetOnLastDisconnect extends YPersistent {
     await super.onClose(connection, code, reason, wasClean);
     if ([...this.getConnections()].length === 0) {
       await this.resetDocument();
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 10. YServer that rejects one reset load to verify transactional recovery
+// ---------------------------------------------------------------------------
+export class YFailingResetLoad extends YServer {
+  static options = {
+    hibernate: true
+  };
+
+  private failNextLoad = false;
+
+  async onLoad(): Promise<void> {
+    if (this.failNextLoad) {
+      this.failNextLoad = false;
+      throw new Error("intentional load failure");
+    }
+  }
+
+  async onRequest(): Promise<Response> {
+    this.failNextLoad = true;
+    try {
+      await this.resetDocument();
+      return new Response(null, { status: 204 });
+    } catch (error) {
+      return new Response(
+        error instanceof Error ? error.message : "Document reset failed",
+        { status: 503 }
+      );
     }
   }
 }

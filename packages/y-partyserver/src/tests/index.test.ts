@@ -796,6 +796,66 @@ describe("YServer — connection lifecycle", () => {
     wsE.close();
   });
 
+  it("keeps the existing document usable when reset loading fails", async () => {
+    const ctx = createExecutionContext();
+    const roomName = "failed-reset-load";
+
+    const resA = await worker.fetch(
+      wsRequest(`y-failing-reset-load/${roomName}`),
+      env,
+      ctx
+    );
+    const wsA = acceptWs(resA);
+    const docA = new Y.Doc();
+    await performSync(wsA, docA);
+
+    docA.getText("shared").insert(0, "preserved state");
+    sendUpdate(wsA, Y.encodeStateAsUpdate(docA));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    wsA.close();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    const failedReset = await worker.fetch(
+      httpRequest(`y-failing-reset-load/${roomName}`),
+      env,
+      ctx
+    );
+    expect(failedReset.status).toBe(503);
+    expect(await failedReset.text()).toBe("intentional load failure");
+
+    const resB = await worker.fetch(
+      wsRequest(`y-failing-reset-load/${roomName}`),
+      env,
+      ctx
+    );
+    const wsB = acceptWs(resB);
+    const docB = new Y.Doc();
+    await performSync(wsB, docB);
+    applyIncomingMessages(await collectMessages(wsB, 300), docB);
+    expect(docB.getText("shared").toString()).toBe("preserved state");
+
+    const resC = await worker.fetch(
+      wsRequest(`y-failing-reset-load/${roomName}`),
+      env,
+      ctx
+    );
+    const wsC = acceptWs(resC);
+    const docC = new Y.Doc();
+    await performSync(wsC, docC);
+    applyIncomingMessages(await collectMessages(wsC, 300), docC);
+
+    const broadcast = collectMessages(wsC, 300);
+    docB.getText("shared").insert(docB.getText("shared").length, " still live");
+    sendUpdate(wsB, Y.encodeStateAsUpdate(docB));
+    applyIncomingMessages(await broadcast, docC);
+    expect(docC.getText("shared").toString()).toBe(
+      "preserved state still live"
+    );
+
+    wsB.close();
+    wsC.close();
+  });
+
   it("flushes and reloads persistence when resetting", async () => {
     const ctx = createExecutionContext();
     const roomName = "persistent-reset-after-final-disconnect";

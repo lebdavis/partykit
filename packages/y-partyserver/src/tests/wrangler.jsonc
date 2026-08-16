@@ -41,6 +41,10 @@
       {
         "name": "YPersistentResetOnLastDisconnect",
         "class_name": "YPersistentResetOnLastDisconnect"
+      },
+      {
+        "name": "YFailingResetLoad",
+        "class_name": "YFailingResetLoad"
       }
     ]
   },
@@ -55,7 +59,8 @@
         "YOnLoadReturnsDoc",
         "YCallbackOptions",
         "YResetOnLastDisconnect",
-        "YPersistentResetOnLastDisconnect"
+        "YPersistentResetOnLastDisconnect",
+        "YFailingResetLoad"
       ]
     }
   ]
