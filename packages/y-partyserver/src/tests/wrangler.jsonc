@@ -33,6 +33,14 @@
       {
         "name": "YCallbackOptions",
         "class_name": "YCallbackOptions"
+      },
+      {
+        "name": "YResetOnLastDisconnect",
+        "class_name": "YResetOnLastDisconnect"
+      },
+      {
+        "name": "YPersistentResetOnLastDisconnect",
+        "class_name": "YPersistentResetOnLastDisconnect"
       }
     ]
   },
@@ -45,7 +53,9 @@
         "YReadOnly",
         "YCustomMessage",
         "YOnLoadReturnsDoc",
-        "YCallbackOptions"
+        "YCallbackOptions",
+        "YResetOnLastDisconnect",
+        "YPersistentResetOnLastDisconnect"
       ]
     }
   ]

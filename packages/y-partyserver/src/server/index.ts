@@ -149,6 +149,7 @@ export interface YjsInstance {
   readonly document: WSSharedDoc;
   onLoad(): Promise<YDoc | void>;
   onSave(): Promise<void>;
+  resetDocument(): Promise<void>;
   unstable_replaceDocument(
     snapshotUpdate: Uint8Array,
     getMetadata?: (key: string) => YjsRootType
@@ -170,7 +171,13 @@ export function withYjs<TBase extends ServerClass>(
   class YjsMixin extends Base {
     static callbackOptions: CallbackOptions = {};
 
-    readonly document: WSSharedDoc = new WSSharedDoc();
+    private _document = new WSSharedDoc();
+    private _saveDocument: ReturnType<typeof debounce> | undefined;
+    private _savePromise: Promise<void> = Promise.resolve();
+
+    get document(): WSSharedDoc {
+      return this._document;
+    }
 
     async onLoad(): Promise<YDoc | void> {
       // to be implemented by the user
@@ -179,6 +186,35 @@ export function withYjs<TBase extends ServerClass>(
 
     async onSave(): Promise<void> {
       // to be implemented by the user
+    }
+
+    /**
+     * Discards the current document and initializes a fresh one.
+     *
+     * Pending persistence is flushed before the old document is destroyed,
+     * and the replacement is restored through `onLoad()` before its event
+     * handlers are attached. The reset is allowed only when no connections
+     * remain so a connected client cannot immediately repopulate the old
+     * state.
+     */
+    async resetDocument(): Promise<void> {
+      if ([...this.getConnections()].length > 0) {
+        throw new Error(
+          "Cannot reset a YServer document while connections are open"
+        );
+      }
+
+      await this.ctx.blockConcurrencyWhile(async () => {
+        this._saveDocument?.flush();
+        await this._savePromise;
+        this._saveDocument?.cancel();
+        this._saveDocument = undefined;
+
+        this._document.destroy();
+        this._document = new WSSharedDoc();
+        await this._loadDocument();
+        this._attachDocumentListeners();
+      });
     }
 
     /**
@@ -244,16 +280,37 @@ export function withYjs<TBase extends ServerClass>(
     }
 
     async onStart(): Promise<void> {
+      await this._loadDocument();
+      this._attachDocumentListeners();
+
+      // After hibernation wake-up, the doc is empty but existing connections
+      // survive. Re-sync by sending sync step 1 to all connections — they'll
+      // respond with sync step 2 containing their full state.
+      // On first start there are no connections, so this is a no-op.
+      const syncEncoder = encoding.createEncoder();
+      encoding.writeVarUint(syncEncoder, messageSync);
+      syncProtocol.writeSyncStep1(syncEncoder, this.document);
+      const syncMessage = encoding.toUint8Array(syncEncoder);
+      for (const conn of this.getConnections()) {
+        send(conn, syncMessage);
+      }
+    }
+
+    private async _loadDocument(): Promise<void> {
       const src = await this.onLoad();
       if (src != null) {
         const state = encodeStateAsUpdate(src);
         applyUpdate(this.document, state);
       }
+    }
+
+    private _attachDocumentListeners(): void {
+      const document = this.document;
 
       // Broadcast doc updates to all connections.
       // Uses this.getConnections() which works for both hibernate and non-hibernate
       // modes and survives DO hibernation (unlike an in-memory Map).
-      this.document.on("update", (update: Uint8Array) => {
+      document.on("update", (update: Uint8Array) => {
         const encoder = encoding.createEncoder();
         encoding.writeVarUint(encoder, messageSync);
         syncProtocol.writeUpdate(encoder, update);
@@ -268,7 +325,7 @@ export function withYjs<TBase extends ServerClass>(
       // When conn is null (internal changes like removeAwarenessStates on close),
       // broadcast the update to remaining connections.
       // When conn is non-null (client message), handleMessage broadcasts directly.
-      this.document.awareness.on(
+      document.awareness.on(
         "update",
         (
           {
@@ -301,7 +358,7 @@ export function withYjs<TBase extends ServerClass>(
             encoding.writeVarUint8Array(
               encoder,
               awarenessProtocol.encodeAwarenessUpdate(
-                this.document.awareness,
+                document.awareness,
                 changedClients
               )
             );
@@ -315,38 +372,24 @@ export function withYjs<TBase extends ServerClass>(
 
       // Debounced persistence handler
       const ctor = this.constructor as typeof YjsMixin;
-      this.document.on(
-        "update",
-        debounce(
-          (_update: Uint8Array, _origin: Connection, _doc: YDoc) => {
-            try {
-              this.onSave().catch((err) => {
-                console.error("failed to persist:", err);
-              });
-            } catch (err) {
+      this._saveDocument = debounce(
+        (_update: Uint8Array, _origin: Connection, _doc: YDoc) => {
+          try {
+            this._savePromise = this.onSave().catch((err) => {
               console.error("failed to persist:", err);
-            }
-          },
-          ctor.callbackOptions.debounceWait || CALLBACK_DEFAULTS.debounceWait,
-          {
-            maxWait:
-              ctor.callbackOptions.debounceMaxWait ||
-              CALLBACK_DEFAULTS.debounceMaxWait
+            });
+          } catch (err) {
+            console.error("failed to persist:", err);
           }
-        )
+        },
+        ctor.callbackOptions.debounceWait || CALLBACK_DEFAULTS.debounceWait,
+        {
+          maxWait:
+            ctor.callbackOptions.debounceMaxWait ||
+            CALLBACK_DEFAULTS.debounceMaxWait
+        }
       );
-
-      // After hibernation wake-up, the doc is empty but existing connections
-      // survive. Re-sync by sending sync step 1 to all connections — they'll
-      // respond with sync step 2 containing their full state.
-      // On first start there are no connections, so this is a no-op.
-      const syncEncoder = encoding.createEncoder();
-      encoding.writeVarUint(syncEncoder, messageSync);
-      syncProtocol.writeSyncStep1(syncEncoder, this.document);
-      const syncMessage = encoding.toUint8Array(syncEncoder);
-      for (const conn of this.getConnections()) {
-        send(conn, syncMessage);
-      }
+      document.on("update", this._saveDocument);
     }
 
     // oxlint-disable-next-line no-unused-vars

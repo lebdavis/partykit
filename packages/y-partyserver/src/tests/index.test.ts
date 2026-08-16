@@ -710,6 +710,123 @@ describe("YServer — connection lifecycle", () => {
       client.ws.close();
     }
   });
+
+  it("can reset its document after the final connection closes", async () => {
+    const ctx = createExecutionContext();
+    const roomName = "reset-after-final-disconnect";
+
+    const resA = await worker.fetch(
+      wsRequest(`y-reset-on-last-disconnect/${roomName}`),
+      env,
+      ctx
+    );
+    const wsA = acceptWs(resA);
+    const docA = new Y.Doc();
+    await performSync(wsA, docA);
+
+    const resB = await worker.fetch(
+      wsRequest(`y-reset-on-last-disconnect/${roomName}`),
+      env,
+      ctx
+    );
+    const wsB = acceptWs(resB);
+    const docB = new Y.Doc();
+    await performSync(wsB, docB);
+    await collectMessages(wsB, 100);
+
+    const activeReset = await worker.fetch(
+      httpRequest(`y-reset-on-last-disconnect/${roomName}`),
+      env,
+      ctx
+    );
+    expect(activeReset.status).toBe(409);
+    expect(await activeReset.text()).toBe(
+      "Cannot reset a YServer document while connections are open"
+    );
+
+    docA.getText("shared").insert(0, "first session");
+    sendUpdate(wsA, Y.encodeStateAsUpdate(docA));
+    applyIncomingMessages(await collectMessages(wsB, 300), docB);
+    expect(docB.getText("shared").toString()).toBe("first session");
+
+    wsA.close();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    const resC = await worker.fetch(
+      wsRequest(`y-reset-on-last-disconnect/${roomName}`),
+      env,
+      ctx
+    );
+    const wsC = acceptWs(resC);
+    const docC = new Y.Doc();
+    await performSync(wsC, docC);
+    applyIncomingMessages(await collectMessages(wsC, 300), docC);
+    expect(docC.getText("shared").toString()).toBe("first session");
+
+    wsB.close();
+    wsC.close();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    const resD = await worker.fetch(
+      wsRequest(`y-reset-on-last-disconnect/${roomName}`),
+      env,
+      ctx
+    );
+    const wsD = acceptWs(resD);
+    const docD = new Y.Doc();
+    await performSync(wsD, docD);
+    applyIncomingMessages(await collectMessages(wsD, 300), docD);
+    expect(docD.getText("shared").toString()).toBe("");
+
+    docD.getText("shared").insert(0, "second session");
+    sendUpdate(wsD, Y.encodeStateAsUpdate(docD));
+
+    const resE = await worker.fetch(
+      wsRequest(`y-reset-on-last-disconnect/${roomName}`),
+      env,
+      ctx
+    );
+    const wsE = acceptWs(resE);
+    const docE = new Y.Doc();
+    await performSync(wsE, docE);
+    applyIncomingMessages(await collectMessages(wsE, 300), docE);
+    expect(docE.getText("shared").toString()).toBe("second session");
+
+    wsD.close();
+    wsE.close();
+  });
+
+  it("flushes and reloads persistence when resetting", async () => {
+    const ctx = createExecutionContext();
+    const roomName = "persistent-reset-after-final-disconnect";
+
+    const resA = await worker.fetch(
+      wsRequest(`y-persistent-reset-on-last-disconnect/${roomName}`),
+      env,
+      ctx
+    );
+    const wsA = acceptWs(resA);
+    const docA = new Y.Doc();
+    await performSync(wsA, docA);
+
+    docA.getText("shared").insert(0, "persisted session");
+    sendUpdate(wsA, Y.encodeStateAsUpdate(docA));
+    wsA.close();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    const resB = await worker.fetch(
+      wsRequest(`y-persistent-reset-on-last-disconnect/${roomName}`),
+      env,
+      ctx
+    );
+    const wsB = acceptWs(resB);
+    const docB = new Y.Doc();
+    await performSync(wsB, docB);
+    applyIncomingMessages(await collectMessages(wsB, 300), docB);
+    expect(docB.getText("shared").toString()).toBe("persisted session");
+
+    wsB.close();
+  });
 });
 
 describe("YServer — handleMessage binary conversion", () => {

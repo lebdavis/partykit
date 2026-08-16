@@ -145,6 +145,36 @@ export class MyDocument extends YServer {
 
 `onSave` is called periodically after the document has been edited, and when the room is emptied. It should be used to save the document state to a database or some other external storage.
 
+### Resetting an empty room
+
+`resetDocument()` discards the current in-memory document and creates a fresh
+one. It flushes any pending `onSave()`, restores the replacement through
+`onLoad()`, and reattaches the synchronization and awareness handlers. The
+method rejects while any connections remain.
+
+Call it after the final connection closes when a disconnected room should form
+a deterministic session boundary:
+
+```ts
+import { YServer } from "y-partyserver";
+import type { Connection } from "partyserver";
+
+export class MyDocument extends YServer {
+  async onClose(
+    connection: Connection,
+    code: number,
+    reason: string,
+    wasClean: boolean
+  ) {
+    await super.onClose(connection, code, reason, wasClean);
+
+    if ([...this.getConnections()].length === 0) {
+      await this.resetDocument();
+    }
+  }
+}
+```
+
 ## Custom Messages
 
 In addition to Yjs synchronization, you can send custom string messages over the same WebSocket connection. This is useful for implementing custom function calling, chat features, or other real-time communication patterns.

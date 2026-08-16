@@ -16,6 +16,8 @@ export type Env = {
   YOnLoadReturnsDoc: DurableObjectNamespace<YOnLoadReturnsDoc>;
   YCallbackOptions: DurableObjectNamespace<YCallbackOptions>;
   YHibernateTracker: DurableObjectNamespace<YHibernateTracker>;
+  YResetOnLastDisconnect: DurableObjectNamespace<YResetOnLastDisconnect>;
+  YPersistentResetOnLastDisconnect: DurableObjectNamespace<YPersistentResetOnLastDisconnect>;
 };
 
 // ---------------------------------------------------------------------------
@@ -181,6 +183,56 @@ export class YHibernateTracker extends YServer {
   async onRequest(): Promise<Response> {
     const count = (await this.ctx.storage.get<number>("onStartCount")) ?? 0;
     return Response.json({ onStartCount: count });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 8. YServer that discards its document after the final connection closes
+// ---------------------------------------------------------------------------
+export class YResetOnLastDisconnect extends YServer {
+  static options = {
+    hibernate: true
+  };
+
+  async onClose(
+    connection: Connection,
+    code: number,
+    reason: string,
+    wasClean: boolean
+  ): Promise<void> {
+    await super.onClose(connection, code, reason, wasClean);
+    if ([...this.getConnections()].length === 0) {
+      await this.resetDocument();
+    }
+  }
+
+  async onRequest(): Promise<Response> {
+    try {
+      await this.resetDocument();
+      return new Response(null, { status: 204 });
+    } catch (error) {
+      return new Response(
+        error instanceof Error ? error.message : "Document reset failed",
+        { status: 409 }
+      );
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 9. Persistent YServer that reloads after the final connection closes
+// ---------------------------------------------------------------------------
+export class YPersistentResetOnLastDisconnect extends YPersistent {
+  async onClose(
+    connection: Connection,
+    code: number,
+    reason: string,
+    wasClean: boolean
+  ): Promise<void> {
+    await super.onClose(connection, code, reason, wasClean);
+    if ([...this.getConnections()].length === 0) {
+      await this.resetDocument();
+    }
   }
 }
 
