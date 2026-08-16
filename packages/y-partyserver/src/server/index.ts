@@ -198,7 +198,7 @@ export function withYjs<TBase extends ServerClass>(
      * state.
      */
     async resetDocument(): Promise<void> {
-      if ([...this.getConnections()].length > 0) {
+      for (const _connection of this.getConnections()) {
         throw new Error(
           "Cannot reset a YServer document while connections are open"
         );
@@ -374,13 +374,11 @@ export function withYjs<TBase extends ServerClass>(
       const ctor = this.constructor as typeof YjsMixin;
       this._saveDocument = debounce(
         (_update: Uint8Array, _origin: Connection, _doc: YDoc) => {
-          try {
-            this._savePromise = this.onSave().catch((err) => {
+          this._savePromise = this._savePromise
+            .then(() => this.onSave())
+            .catch((err) => {
               console.error("failed to persist:", err);
             });
-          } catch (err) {
-            console.error("failed to persist:", err);
-          }
         },
         ctor.callbackOptions.debounceWait || CALLBACK_DEFAULTS.debounceWait,
         {
